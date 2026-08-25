@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+# Postfix for the mail plane. The configuration is not baked in: main.cf, the master.cf
+# additions and the four pgsql maps are mounted from mail/postfix/ and rendered at start,
+# so the repo stays the single source of truth for both this image and production.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        postfix postfix-pgsql ca-certificates gettext-base openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY entrypoint-postfix.sh /usr/local/bin/entrypoint
+COPY dev-cert.sh /usr/local/bin/dev-cert
+RUN chmod 755 /usr/local/bin/entrypoint /usr/local/bin/dev-cert
+
+EXPOSE 25 465 587
+ENTRYPOINT ["/usr/local/bin/entrypoint"]

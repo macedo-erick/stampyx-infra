@@ -1,0 +1,402 @@
+name: deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      api_tag:
+        description: 'stampyx-api image tag (blank leaves it untouched)'
+        required: false
+      ui_tag:
+        description: 'stampyx-ui image tag (blank leaves it untouched)'
+        required: false
+      landing_tag:
+        description: 'stampyx-landing image tag (blank leaves it untouched)'
+        required: false
+      mail_tag:
+        description: 'mail plane image tag (blank leaves it untouched)'
+        required: false
+      allow_secret_change:
+        description: 'Permit a credential to differ from what the VPS already has'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+env:
+  REGION: southamerica-east1
+  REPOSITORY: stampyx
+  VPS_PATH: stampyx-infra
+  PUBLIC_URL: https://stampyx.com
+  NEIGHBOUR_URL: https://listryx.com/ui/
+  WAIT_TIMEOUT: '300'
+  # keycloak-proxy.conf is deliberately absent: the auth repo owns the live file, and this
+  # workflow copies an explicit list rather than syncing the directory. A sync would delete
+  # it, and stampyx.conf includes it, so the next `nginx -t` would fail.
+  NGINX_PAYLOAD: nginx/stampyx.conf nginx/snippets/stampyx-proxy.conf
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate inputs
+        id: validate
+        env:
+          API_TAG: ${{ inputs.api_tag }}
+          UI_TAG: ${{ inputs.ui_tag }}
+          LANDING_TAG: ${{ inputs.landing_tag }}
+          MAIL_TAG: ${{ inputs.mail_tag }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+          KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
+          STAMPYX_PROVISIONING_SECRET: ${{ secrets.STAMPYX_PROVISIONING_SECRET }}
+          MAIL_INTERNAL_SECRET: ${{ secrets.MAIL_INTERNAL_SECRET }}
+          MAIL_MASTER_PASSWORD: ${{ secrets.MAIL_MASTER_PASSWORD }}
+          MAIL_PUBLIC_IP: ${{ secrets.MAIL_PUBLIC_IP }}
+          API_LOG_LEVEL: ${{ vars.API_LOG_LEVEL }}
+        run: |
+          set -euo pipefail
+          fail=0
+          selected=''
+
+          for pair in "api:$API_TAG" "ui:$UI_TAG" "landing:$LANDING_TAG" "mail:$MAIL_TAG"; do
+              name=${pair%%:*}
+              tag=${pair#*:}
+              [[ -z $tag ]] && continue
+
+              if [[ ! $tag =~ ^[A-Za-z0-9._-]{1,128}$ ]]; then
+                  echo "::error::$name tag '$tag' is not a valid image tag"
+                  fail=1
+              fi
+
+              selected="$selected $name"
+          done
+
+          if [[ -z ${selected// /} ]]; then
+              echo '::error::Nothing selected. Give at least one tag.'
+              fail=1
+          fi
+
+          # A single quote cannot be represented in a Compose .env value, and there is no
+          # escape for it, so a credential containing one would break the whole stack.
+          for name in GCP_PROJECT_ID APP_DB_PASSWORD KEYCLOAK_ADMIN_CLIENT_SECRET \
+                      STAMPYX_PROVISIONING_SECRET MAIL_INTERNAL_SECRET MAIL_MASTER_PASSWORD \
+                      MAIL_PUBLIC_IP; do
+              value=${!name:-}
+
+              if [[ -z $value ]]; then
+                  echo "::error::secret $name is empty"
+                  fail=1
+              elif [[ $value == *"'"* ]]; then
+                  echo "::error::secret $name contains a single quote"
+                  fail=1
+              fi
+          done
+
+          if [[ -n ${API_LOG_LEVEL:-} ]] &&
+             [[ ! $API_LOG_LEVEL =~ ^(trace|debug|info|warn|error|fatal)$ ]]; then
+              echo "::error::API_LOG_LEVEL '$API_LOG_LEVEL' is not a pino level"
+              fail=1
+          fi
+
+          [[ $fail -eq 0 ]] || exit 1
+          echo "services=${selected# }" >> "$GITHUB_OUTPUT"
+
+      - name: Configure SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_SSH_KNOWN_HOSTS: ${{ secrets.VPS_SSH_KNOWN_HOSTS }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir -p ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          printf '%s\n' "$VPS_SSH_KNOWN_HOSTS" > ~/.ssh/deploy_known_hosts
+
+          {
+            echo "SSH_OPTS=-o BatchMode=yes -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$HOME/.ssh/deploy_known_hosts -i $HOME/.ssh/deploy_key"
+            echo "REMOTE=$VPS_USER@$VPS_HOST"
+          } >> "$GITHUB_ENV"
+
+      - name: Ship compose.prod.yaml, the nginx config and the mail configs
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" "mkdir -p '$VPS_PATH' && cat > '$VPS_PATH/compose.prod.yaml.staged'" < compose.prod.yaml
+          # shellcheck disable=SC2086
+          tar -cz $NGINX_PAYLOAD | ssh $SSH_OPTS "$REMOTE" "rm -rf '$VPS_PATH/.nginx-staged' && mkdir -p '$VPS_PATH/.nginx-staged' && tar -xz -C '$VPS_PATH/.nginx-staged'"
+          # shellcheck disable=SC2086
+          tar -cz mail | ssh $SSH_OPTS "$REMOTE" "rm -rf '$VPS_PATH/.mail-staged' && mkdir -p '$VPS_PATH/.mail-staged' && tar -xz -C '$VPS_PATH/.mail-staged'"
+
+      - name: Read current tags from the VPS
+        id: current
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          current=$(ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          path=$1
+          read_env_key() {
+              [[ -f "$path/.env" ]] || return 0
+              sed -n "s/^$1=//p" "$path/.env" | tail -n1 | sed "s/^['\"]//; s/['\"]$//"
+          }
+          printf 'api=%s\nui=%s\nlanding=%s\nmail=%s\n' \
+              "$(read_env_key API_TAG)" "$(read_env_key UI_TAG)" \
+              "$(read_env_key LANDING_TAG)" "$(read_env_key MAIL_TAG)"
+          REMOTE_SCRIPT
+          )
+
+          for name in api ui landing mail; do
+              live=$(sed -n "s/^$name=//p" <<< "$current")
+              case $name in
+                api) chosen=${{ inputs.api_tag }} ;;
+                ui) chosen=${{ inputs.ui_tag }} ;;
+                landing) chosen=${{ inputs.landing_tag }} ;;
+                mail) chosen=${{ inputs.mail_tag }} ;;
+              esac
+              chosen=${chosen:-$live}
+
+              if [[ -z $chosen ]]; then
+                  echo "::error::$name has no tag on the VPS and none was given. This looks like a first deploy: supply every tag."
+                  exit 1
+              fi
+
+              echo "${name}_tag=$chosen" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Check for credential drift
+        if: ${{ !inputs.allow_secret_change }}
+        env:
+          APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+          KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
+          STAMPYX_PROVISIONING_SECRET: ${{ secrets.STAMPYX_PROVISIONING_SECRET }}
+          MAIL_INTERNAL_SECRET: ${{ secrets.MAIL_INTERNAL_SECRET }}
+          MAIL_MASTER_PASSWORD: ${{ secrets.MAIL_MASTER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          live=$(ssh $SSH_OPTS "$REMOTE" "cat '$VPS_PATH/.env' 2>/dev/null || true")
+
+          [[ -n $live ]] || { echo 'No .env on the VPS yet; nothing to compare.'; exit 0; }
+
+          fail=0
+          for name in APP_DB_PASSWORD KEYCLOAK_ADMIN_CLIENT_SECRET STAMPYX_PROVISIONING_SECRET \
+                      MAIL_INTERNAL_SECRET MAIL_MASTER_PASSWORD; do
+              remote=$(sed -n "s/^$name=//p" <<< "$live" | tail -n1 | sed "s/^'//; s/'$//")
+
+              if [[ -n $remote && $remote != "${!name}" ]]; then
+                  echo "::error::$name differs from the value on the VPS. Re-run with allow_secret_change if that is intended."
+                  fail=1
+              fi
+          done
+
+          [[ $fail -eq 0 ]] || exit 1
+
+      - name: Stage the rendered .env
+        env:
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+          APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
+          KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
+          STAMPYX_PROVISIONING_SECRET: ${{ secrets.STAMPYX_PROVISIONING_SECRET }}
+          MAIL_INTERNAL_SECRET: ${{ secrets.MAIL_INTERNAL_SECRET }}
+          MAIL_MASTER_PASSWORD: ${{ secrets.MAIL_MASTER_PASSWORD }}
+          MAIL_PUBLIC_IP: ${{ secrets.MAIL_PUBLIC_IP }}
+          API_LOG_LEVEL: ${{ vars.API_LOG_LEVEL }}
+        run: |
+          set -euo pipefail
+          # Built here and piped straight over; never echoed into the log.
+          {
+            printf 'REGISTRY=%s-docker.pkg.dev/%s/%s\n' "$REGION" "$GCP_PROJECT_ID" "$REPOSITORY"
+            printf 'API_TAG=%s\n' '${{ steps.current.outputs.api_tag }}'
+            printf 'UI_TAG=%s\n' '${{ steps.current.outputs.ui_tag }}'
+            printf 'LANDING_TAG=%s\n' '${{ steps.current.outputs.landing_tag }}'
+            printf 'MAIL_TAG=%s\n' '${{ steps.current.outputs.mail_tag }}'
+            printf "APP_DB_PASSWORD='%s'\n" "$APP_DB_PASSWORD"
+            printf "KEYCLOAK_ADMIN_CLIENT_SECRET='%s'\n" "$KEYCLOAK_ADMIN_CLIENT_SECRET"
+            printf "STAMPYX_PROVISIONING_SECRET='%s'\n" "$STAMPYX_PROVISIONING_SECRET"
+            printf "MAIL_INTERNAL_SECRET='%s'\n" "$MAIL_INTERNAL_SECRET"
+            printf "MAIL_MASTER_PASSWORD='%s'\n" "$MAIL_MASTER_PASSWORD"
+            printf 'MAIL_PUBLIC_IP=%s\n' "$MAIL_PUBLIC_IP"
+            printf 'API_LOG_LEVEL=%s\n' "${API_LOG_LEVEL:-info}"
+          } | ssh $SSH_OPTS "$REMOTE" "umask 077 && cat > '$VPS_PATH/.env.staged'"
+
+      - name: Pull images against the staged files
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" "cd '$VPS_PATH' && docker compose -f compose.prod.yaml.staged --env-file .env.staged pull ${{ steps.validate.outputs.services }}"
+
+      - name: Deploy
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" "$WAIT_TIMEOUT" "${{ steps.validate.outputs.services }}" <<'REMOTE_SCRIPT' | tee /tmp/deploy.log
+          set -euo pipefail
+          path=$1; wait_timeout=$2; read -ra services <<< "$3"
+          cd "$path"
+
+          [[ -f .env ]] && cp .env .env.prev
+          mv .env.staged .env
+          mv compose.prod.yaml.staged compose.prod.yaml
+
+          rm -rf mail && mv .mail-staged/mail mail && rm -rf .mail-staged
+
+          COMPOSE=compose.prod.yaml
+
+          # Before `up`, so a bad migration never reaches a running container.
+          if [[ " ${services[*]} " == *" api "* ]]; then
+              docker compose -f "$COMPOSE" run --rm -T api node dist/database/migrate.js < /dev/null \
+                  || { echo 'error: stampyx-api migrations failed; the stack was not touched' >&2; exit 1; }
+          fi
+
+          if [[ ${#services[@]} -eq 4 ]]; then
+              docker compose -f "$COMPOSE" up -d --wait --wait-timeout "$wait_timeout" --remove-orphans
+          else
+              docker compose -f "$COMPOSE" up -d --wait --wait-timeout "$wait_timeout" --no-deps "${services[@]}"
+          fi
+
+          docker image prune -f
+          docker compose -f "$COMPOSE" ps
+          echo DEPLOY_SCRIPT_COMPLETE
+          REMOTE_SCRIPT
+
+          grep -q DEPLOY_SCRIPT_COMPLETE /tmp/deploy.log || {
+              echo '::error::The remote script did not run to completion. Check whether a command in it consumed stdin.'
+              exit 1
+          }
+
+      - name: Install the nginx config
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+          path=$1
+          cd "$path/.nginx-staged"
+
+          live_path_for() {
+              case $1 in
+                  nginx/stampyx.conf) echo /etc/nginx/sites-available/stampyx ;;
+                  nginx/snippets/stampyx-proxy.conf) echo /etc/nginx/snippets/stampyx-proxy.conf ;;
+                  *) return 1 ;;
+              esac
+          }
+
+          changed=0
+          mkdir -p "$path/nginx-prev"
+
+          for file in nginx/stampyx.conf nginx/snippets/stampyx-proxy.conf; do
+              live=$(live_path_for "$file")
+
+              [[ -f $live ]] || { echo "error: $live does not exist. See VPS_SETUP.md section 5." >&2; exit 1; }
+              [[ -w $live ]] || { echo "error: $live is not writable by this user. See VPS_SETUP.md section 5." >&2; exit 1; }
+
+              if cmp -s "$file" "$live"; then
+                  continue
+              fi
+
+              cp "$live" "$path/nginx-prev/$(basename "$live")"
+              cp "$file" "$live"
+              changed=1
+          done
+
+          if [[ $changed -eq 0 ]]; then
+              echo 'nginx config unchanged; not reloading.'
+              exit 0
+          fi
+
+          if ! sudo nginx -t; then
+              echo 'error: nginx -t failed; restoring the previous config' >&2
+              for file in nginx/stampyx.conf nginx/snippets/stampyx-proxy.conf; do
+                  live=$(live_path_for "$file")
+                  cp "$path/nginx-prev/$(basename "$live")" "$live"
+              done
+              exit 1
+          fi
+
+          sudo systemctl reload nginx
+          REMOTE_SCRIPT
+
+      - name: Smoke checks
+        run: |
+          set -euo pipefail
+          fail=0
+
+          # A restart loop takes a few seconds to show, so dwell before believing `up`.
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" "sleep 15 && cd '$VPS_PATH' && docker compose -f compose.prod.yaml ps --format '{{.Service}} {{.Status}}'"
+
+          landing=$(curl -fsS -o /dev/null -w '%{http_code}' "$PUBLIC_URL/" || echo 000)
+          [[ $landing == 200 ]] || { echo "::error::landing answered $landing"; fail=1; }
+
+          ui=$(curl -fsS -o /dev/null -w '%{http_code}' "$PUBLIC_URL/ui/" || echo 000)
+          [[ $ui == 200 ]] || { echo "::error::ui answered $ui"; fail=1; }
+
+          # Exactly 401 proves the guard is mounted, not merely that the port answers.
+          api=$(curl -s -o /dev/null -w '%{http_code}' "$PUBLIC_URL/api/domains")
+          [[ $api == 401 ]] || { echo "::error::/api/domains answered $api, expected 401"; fail=1; }
+
+          for path in /metrics /health /internal/mail/received; do
+              code=$(curl -s -o /dev/null -w '%{http_code}' "$PUBLIC_URL$path")
+              [[ $code == 404 ]] || { echo "::error::$path is publicly reachable ($code)"; fail=1; }
+          done
+
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" bash -s <<'REMOTE_SCRIPT' || fail=1
+          set -euo pipefail
+          rc=0
+
+          echo | openssl s_client -starttls smtp -connect 127.0.0.1:587 -servername mail.stampyx.com 2>/dev/null \
+              | grep -q 'subject=' || { echo 'error: submission on 587 did not present a certificate' >&2; rc=1; }
+
+          nc -z 127.0.0.1 993 || { echo 'error: IMAPS on 993 is not answering' >&2; rc=1; }
+          nc -z 127.0.0.1 25  || { echo 'error: SMTP on 25 is not answering' >&2; rc=1; }
+
+          curl -fsS http://127.0.0.1:8091/health | grep -q '"status":"ok"' \
+              || { echo 'error: api /health is not ok' >&2; rc=1; }
+
+          exit $rc
+          REMOTE_SCRIPT
+
+          # The nginx reload must not have taken a neighbour down with it.
+          neighbour=$(curl -fsS -o /dev/null -w '%{http_code}' "$NEIGHBOUR_URL" || echo 000)
+          [[ $neighbour == 200 ]] || { echo "::error::neighbour $NEIGHBOUR_URL answered $neighbour"; fail=1; }
+
+          [[ $fail -eq 0 ]] || exit 1
+
+      - name: Dump logs on failure
+        if: failure()
+        run: |
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" "cd '$VPS_PATH' && docker compose -f compose.prod.yaml logs --tail 200" || true
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '| service | tag |'
+            echo '|---|---|'
+            echo '| api | ${{ steps.current.outputs.api_tag }} |'
+            echo '| ui | ${{ steps.current.outputs.ui_tag }} |'
+            echo '| landing | ${{ steps.current.outputs.landing_tag }} |'
+            echo '| mail | ${{ steps.current.outputs.mail_tag }} |'
+            echo
+            echo 'To roll back, re-run this workflow with the previous tags.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up
+        if: always()
+        run: |
+          # shellcheck disable=SC2086
+          ssh $SSH_OPTS "$REMOTE" "cd '$VPS_PATH' && rm -f .env.staged compose.prod.yaml.staged && rm -rf .nginx-staged .mail-staged" || true
+          rm -f ~/.ssh/deploy_key ~/.ssh/deploy_known_hosts

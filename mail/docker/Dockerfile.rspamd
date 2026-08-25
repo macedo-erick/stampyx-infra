@@ -1,0 +1,13 @@
+# syntax=docker/dockerfile:1
+# rspamd as the milter Postfix hands every message to, inbound and outbound. The local.d
+# overrides are mounted from mail/rspamd/, not baked in.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends rspamd ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 11332 11333 11334
+CMD ["rspamd", "-f", "-u", "_rspamd", "-g", "_rspamd"]

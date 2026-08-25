@@ -1,0 +1,5 @@
+hosts = ${DB_HOST}
+user = ${DB_USER}
+password = ${DB_PASSWORD}
+dbname = ${DB_NAME}
+query = SELECT a.destination FROM alias a JOIN domain d ON d.id = a.domain_id JOIN account ac ON ac.id = d.account_id WHERE a.source = '%s' AND d.active AND d.verified_at IS NOT NULL AND ac.status = 'active'

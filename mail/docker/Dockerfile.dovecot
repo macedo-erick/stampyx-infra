@@ -1,0 +1,25 @@
+# syntax=docker/dockerfile:1
+# Dovecot for the mail plane: IMAP for the panel, LMTP for Postfix deliveries, and the Sieve
+# pipe that tells the API a message arrived. dovecot.conf and the SQL passdb are mounted from
+# mail/dovecot/ and installed at start.
+
+FROM debian:bookworm-slim
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        dovecot-core dovecot-imapd dovecot-lmtpd dovecot-pgsql \
+        dovecot-sieve dovecot-managesieved \
+        ca-certificates curl gettext-base openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+# first_valid_uid in dovecot.conf is 1000, so vmail has to be at or above it.
+RUN groupadd -g 1000 vmail \
+    && useradd -u 1000 -g vmail -d /data/vmail -s /usr/sbin/nologin vmail
+
+COPY entrypoint-dovecot.sh /usr/local/bin/entrypoint
+COPY dev-cert.sh /usr/local/bin/dev-cert
+RUN chmod 755 /usr/local/bin/entrypoint /usr/local/bin/dev-cert
+
+EXPOSE 143 993 24 12345
+ENTRYPOINT ["/usr/local/bin/entrypoint"]

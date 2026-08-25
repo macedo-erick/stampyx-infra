@@ -1,0 +1,149 @@
+name: stampyx
+
+networks:
+  stampyx:
+    ipam:
+      config:
+        - subnet: 172.23.0.0/16
+
+volumes:
+  vmail:
+  sieve:
+  attachments:
+  rspamd:
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '3'
+
+services:
+  ui:
+    image: ${REGISTRY:?REGISTRY is not set}/ui:${UI_TAG:?UI_TAG is not set}
+    restart: unless-stopped
+    ports: ['127.0.0.1:8090:8080']
+    networks: [stampyx]
+    logging: *logging
+
+  landing:
+    image: ${REGISTRY:?REGISTRY is not set}/landing:${LANDING_TAG:?LANDING_TAG is not set}
+    restart: unless-stopped
+    ports: ['127.0.0.1:8094:8080']
+    networks: [stampyx]
+    logging: *logging
+
+  api:
+    image: ${REGISTRY:?REGISTRY is not set}/api:${API_TAG:?API_TAG is not set}
+    restart: unless-stopped
+    ports: ['127.0.0.1:8091:8080']
+    networks: [stampyx]
+    extra_hosts:
+      # Postgres runs on the host, not in this stack.
+      - 'host.docker.internal:host-gateway'
+      # The issuer string must resolve identically inside the container and in the browser.
+      - 'stampyx.com:host-gateway'
+      - 'auth.macedosoftware.com:host-gateway'
+    environment:
+      DB_HOST: host.docker.internal
+      DB_PORT: '5432'
+      POSTGRES_DB: stampyx
+      POSTGRES_USER: stampyx_app
+      POSTGRES_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD is not set}
+
+      HTTP_HOST: 0.0.0.0
+      HTTP_PORT: '8080'
+
+      KEYCLOAK_ISSUER_URI: https://stampyx.com/auth/realms/stampyx
+      # The product vhost 404s /auth/admin/, so the Admin API has to go to the admin vhost.
+      KEYCLOAK_SERVER_URL: https://auth.macedosoftware.com/auth
+      KEYCLOAK_REALM: stampyx
+      KEYCLOAK_ADMIN_CLIENT_ID: stampyx-api-admin
+      KEYCLOAK_ADMIN_CLIENT_SECRET: ${KEYCLOAK_ADMIN_CLIENT_SECRET:?KEYCLOAK_ADMIN_CLIENT_SECRET is not set}
+      STAMPYX_PROVISIONING_SECRET: ${STAMPYX_PROVISIONING_SECRET:?STAMPYX_PROVISIONING_SECRET is not set}
+      STAMPYX_ACCOUNT_AUTO_APPROVE: ${STAMPYX_ACCOUNT_AUTO_APPROVE:-true}
+
+      MAIL_INTERNAL_SECRET: ${MAIL_INTERNAL_SECRET:?MAIL_INTERNAL_SECRET is not set}
+      MAIL_IMAP_HOST: dovecot
+      MAIL_IMAP_PORT: '143'
+      MAIL_SMTP_HOST: postfix
+      MAIL_SMTP_PORT: '587'
+      MAIL_MASTER_USER: stampyx-api
+      MAIL_MASTER_PASSWORD: ${MAIL_MASTER_PASSWORD:?MAIL_MASTER_PASSWORD is not set}
+      MAIL_HOSTNAME: mail.stampyx.com
+      MAIL_PUBLIC_IP: ${MAIL_PUBLIC_IP:?MAIL_PUBLIC_IP is not set}
+      DMARC_REPORT_EMAIL: dmarc@stampyx.com
+      MAIL_SIEVE_DIR: /data/sieve
+      MAIL_ATTACHMENTS_DIR: /data/attachments
+
+      STAMPYX_PLATFORM_DOMAINS: stampyx.com
+      STAMPYX_JWT_SECRET: ${STAMPYX_JWT_SECRET:?STAMPYX_JWT_SECRET is not set}
+      STAMPYX_ADMIN_ROLE: stampyx-admin
+
+      STAMPYX_CORS_ORIGINS: https://stampyx.com
+      LOG_LEVEL: ${API_LOG_LEVEL:-info}
+      LOG_PRETTY: 'false'
+    volumes:
+      - sieve:/data/sieve
+      - attachments:/data/attachments
+    depends_on:
+      dovecot:
+        condition: service_started
+    logging: *logging
+
+  postfix:
+    image: ${REGISTRY:?REGISTRY is not set}/postfix:${MAIL_TAG:?MAIL_TAG is not set}
+    restart: unless-stopped
+    # The only containers on this box that are not loopback-only. See VPS_SETUP.md section 6.
+    ports:
+      - '25:25'
+      - '465:465'
+      - '587:587'
+    networks: [stampyx]
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      MAIL_HOSTNAME: mail.stampyx.com
+      DB_HOST: host.docker.internal
+      DB_NAME: stampyx
+      DB_USER: stampyx_app
+      DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD is not set}
+      API_INTERNAL_URL: http://api:8080
+      MAIL_INTERNAL_SECRET: ${MAIL_INTERNAL_SECRET:?MAIL_INTERNAL_SECRET is not set}
+    volumes:
+      - /etc/letsencrypt/live/mail.stampyx.com:/etc/letsencrypt/live/mail.stampyx.com:ro
+      - /etc/letsencrypt/archive/mail.stampyx.com:/etc/letsencrypt/archive/mail.stampyx.com:ro
+    logging: *logging
+
+  dovecot:
+    image: ${REGISTRY:?REGISTRY is not set}/dovecot:${MAIL_TAG:?MAIL_TAG is not set}
+    restart: unless-stopped
+    ports:
+      - '993:993'
+    networks: [stampyx]
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    environment:
+      MAIL_HOSTNAME: mail.stampyx.com
+      DB_HOST: host.docker.internal
+      DB_NAME: stampyx
+      DB_USER: stampyx_app
+      DB_PASSWORD: ${APP_DB_PASSWORD:?APP_DB_PASSWORD is not set}
+      API_INTERNAL_URL: http://api:8080
+      MAIL_INTERNAL_SECRET: ${MAIL_INTERNAL_SECRET:?MAIL_INTERNAL_SECRET is not set}
+      MAIL_MASTER_USER: stampyx-api
+      MAIL_MASTER_PASSWORD: ${MAIL_MASTER_PASSWORD:?MAIL_MASTER_PASSWORD is not set}
+    volumes:
+      - vmail:/data/vmail
+      - sieve:/data/sieve
+      - /etc/letsencrypt/live/mail.stampyx.com:/etc/letsencrypt/live/mail.stampyx.com:ro
+      - /etc/letsencrypt/archive/mail.stampyx.com:/etc/letsencrypt/archive/mail.stampyx.com:ro
+    logging: *logging
+
+  rspamd:
+    image: ${REGISTRY:?REGISTRY is not set}/rspamd:${MAIL_TAG:?MAIL_TAG is not set}
+    restart: unless-stopped
+    networks: [stampyx]
+    volumes:
+      - rspamd:/var/lib/rspamd
+    logging: *logging

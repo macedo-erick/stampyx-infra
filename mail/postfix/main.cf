@@ -1,0 +1,54 @@
+# Managed by stampyx-infra. Domains, mailboxes and permitted senders all come from Postgres
+# through the three views the API owns; nothing here is a static map.
+
+myhostname = ${MAIL_HOSTNAME}
+mydestination =
+biff = no
+append_dot_mydomain = no
+compatibility_level = 3.6
+
+smtpd_banner = $myhostname ESMTP
+
+virtual_mailbox_domains = pgsql:/etc/postfix/pgsql/domains.cf
+virtual_mailbox_maps    = pgsql:/etc/postfix/pgsql/mailboxes.cf
+virtual_alias_maps      = pgsql:/etc/postfix/pgsql/aliases.cf
+virtual_transport       = lmtp:inet:dovecot:24
+
+# SASL is delegated to Dovecot, so there is exactly one place a password is checked.
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = inet:dovecot:12345
+smtpd_sasl_auth_enable = yes
+
+# Binds an authenticated login to the addresses it may use as MAIL FROM. Without the
+# reject below, authenticating would be enough to send as another tenant's verified
+# domain, and this server would DKIM-sign the forgery.
+smtpd_sender_login_maps = pgsql:/etc/postfix/pgsql/senders.cf
+
+smtpd_tls_cert_file = /etc/letsencrypt/live/${MAIL_HOSTNAME}/fullchain.pem
+smtpd_tls_key_file  = /etc/letsencrypt/live/${MAIL_HOSTNAME}/privkey.pem
+smtpd_tls_security_level = may
+smtpd_tls_protocols = !SSLv2, !SSLv3, !TLSv1, !TLSv1.1
+smtp_tls_security_level = may
+
+# Port 25 is inbound only: no relaying for anyone who has not authenticated.
+smtpd_relay_restrictions =
+    permit_mynetworks
+    permit_sasl_authenticated
+    reject_unauth_destination
+
+smtpd_recipient_restrictions =
+    permit_mynetworks
+    permit_sasl_authenticated
+    reject_unauth_destination
+    reject_unknown_recipient_domain
+
+# A second line of defence behind the API's own per-account daily cap.
+smtpd_client_connection_rate_limit = 30
+smtpd_client_message_rate_limit = 100
+anvil_rate_time_unit = 60s
+
+message_size_limit = 36700160
+
+milter_default_action = accept
+smtpd_milters = inet:rspamd:11332
+non_smtpd_milters = inet:rspamd:11332
