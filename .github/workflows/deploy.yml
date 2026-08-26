@@ -4,19 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       api_tag:
-        description: 'stampyx-api image tag (blank leaves it untouched)'
-        required: false
+        description: 'API image tag (commit SHA) — leave blank to leave the API untouched'
+        type: string
+        default: ''
       ui_tag:
-        description: 'stampyx-ui image tag (blank leaves it untouched)'
-        required: false
+        description: 'UI image tag (commit SHA) — leave blank to leave the UI untouched'
+        type: string
+        default: ''
       landing_tag:
-        description: 'stampyx-landing image tag (blank leaves it untouched)'
-        required: false
+        description: 'Landing image tag (commit SHA) — leave blank to leave the landing untouched'
+        type: string
+        default: ''
       mail_tag:
-        description: 'mail plane image tag (blank leaves it untouched)'
-        required: false
+        description: 'Mail image tag (commit SHA) — leave blank to leave postfix, dovecot and rspamd untouched'
+        type: string
+        default: ''
       allow_secret_change:
-        description: 'Permit a credential to differ from what the VPS already has'
+        description: 'Allow credentials to differ from the VPS (credential rotation)'
         type: boolean
         default: false
 
