@@ -19,6 +19,10 @@ on:
         description: 'Mail image tag (commit SHA) — leave blank to leave postfix, dovecot and rspamd untouched'
         type: string
         default: ''
+      build_mail:
+        description: 'Build the mail images from this commit and deploy them (leave mail_tag blank)'
+        type: boolean
+        default: false
       allow_secret_change:
         description: 'Allow credentials to differ from the VPS (credential rotation)'
         type: boolean
@@ -44,7 +48,17 @@ env:
   NGINX_PAYLOAD: nginx/stampyx.conf nginx/snippets/stampyx-proxy.conf
 
 jobs:
+  # Skipped unless the box is ticked. Publishing from the deploy run is what lets the mail
+  # tag be filled in automatically: it is this commit's SHA, so there is nothing to copy.
+  build-mail:
+    if: ${{ inputs.build_mail }}
+    uses: ./.github/workflows/release.yml
+    secrets: inherit
+
   deploy:
+    needs: [build-mail]
+    # `skipped` is the normal case: every deploy that does not touch mail.
+    if: ${{ always() && (needs.build-mail.result == 'success' || needs.build-mail.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 20
@@ -57,7 +71,7 @@ jobs:
           API_TAG: ${{ inputs.api_tag }}
           UI_TAG: ${{ inputs.ui_tag }}
           LANDING_TAG: ${{ inputs.landing_tag }}
-          MAIL_TAG: ${{ inputs.mail_tag }}
+          MAIL_TAG: ${{ inputs.build_mail && github.sha || inputs.mail_tag }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
           KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
@@ -72,7 +86,10 @@ jobs:
           set -euo pipefail
           fail=0
           selected=''
+          planes=0
 
+          # `mail` is one input but three Compose services. Everything downstream — pull and
+          # up — takes real service names, so the expansion happens here, once.
           for pair in "api:$API_TAG" "ui:$UI_TAG" "landing:$LANDING_TAG" "mail:$MAIL_TAG"; do
               name=${pair%%:*}
               tag=${pair#*:}
@@ -83,11 +100,21 @@ jobs:
                   fail=1
               fi
 
-              selected="$selected $name"
+              case $name in
+                  mail) selected="$selected postfix dovecot rspamd" ;;
+                  *) selected="$selected $name" ;;
+              esac
+
+              planes=$((planes + 1))
           done
 
           if [[ -z ${selected// /} ]]; then
-              echo '::error::Nothing selected. Give at least one tag.'
+              echo '::error::Nothing selected. Give at least one tag, or tick build_mail.'
+              fail=1
+          fi
+
+          if [[ '${{ inputs.build_mail }}' == 'true' && -n '${{ inputs.mail_tag }}' ]]; then
+              echo '::error::build_mail builds this commit and deploys it. Leave mail_tag blank, or untick build_mail to deploy an existing tag.'
               fail=1
           fi
 
@@ -128,6 +155,12 @@ jobs:
 
           [[ $fail -eq 0 ]] || exit 1
           echo "services=${selected# }" >> "$GITHUB_OUTPUT"
+          # Counting service names would not answer this any more: mail alone is three.
+          if [[ $planes -eq 4 ]]; then
+              echo 'full=true' >> "$GITHUB_OUTPUT"
+          else
+              echo 'full=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Configure SSH
         env:
@@ -159,6 +192,8 @@ jobs:
 
       - name: Read current tags from the VPS
         id: current
+        env:
+          MAIL_TAG: ${{ inputs.build_mail && github.sha || inputs.mail_tag }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086
@@ -181,7 +216,7 @@ jobs:
                 api) chosen=${{ inputs.api_tag }} ;;
                 ui) chosen=${{ inputs.ui_tag }} ;;
                 landing) chosen=${{ inputs.landing_tag }} ;;
-                mail) chosen=${{ inputs.mail_tag }} ;;
+                mail) chosen=$MAIL_TAG ;;
               esac
               chosen=${chosen:-$live}
 
@@ -261,12 +296,17 @@ jobs:
           ssh $SSH_OPTS "$REMOTE" "cd '$VPS_PATH' && docker compose -f compose.prod.yaml.staged --env-file .env.staged pull ${{ steps.validate.outputs.services }}"
 
       - name: Deploy
+        env:
+          FULL: ${{ steps.validate.outputs.full }}
+          SELECTED: ${{ steps.validate.outputs.services }}
         run: |
           set -euo pipefail
+          # SELECTED is deliberately unquoted: ssh joins the command argv into one string
+          # that the remote shell re-splits, so each service has to arrive as its own word.
           # shellcheck disable=SC2086
-          ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" "$WAIT_TIMEOUT" "${{ steps.validate.outputs.services }}" <<'REMOTE_SCRIPT' | tee /tmp/deploy.log
+          ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" "$WAIT_TIMEOUT" "$FULL" $SELECTED <<'REMOTE_SCRIPT' | tee /tmp/deploy.log
           set -euo pipefail
-          path=$1; wait_timeout=$2; read -ra services <<< "$3"
+          path=$1; wait_timeout=$2; full=$3; shift 3; services=("$@")
           cd "$path"
 
           [[ -f .env ]] && cp .env .env.prev
@@ -283,7 +323,7 @@ jobs:
                   || { echo 'error: stampyx-api migrations failed; the stack was not touched' >&2; exit 1; }
           fi
 
-          if [[ ${#services[@]} -eq 4 ]]; then
+          if [[ $full == true ]]; then
               docker compose -f "$COMPOSE" up -d --wait --wait-timeout "$wait_timeout" --remove-orphans
           else
               docker compose -f "$COMPOSE" up -d --wait --wait-timeout "$wait_timeout" --no-deps "${services[@]}"

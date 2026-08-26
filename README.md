@@ -1,8 +1,11 @@
 # stampyx-infra
 
-Deploys the Stampyx stack to the shared VPS. It builds nothing: the workflow ships
+Deploys the Stampyx stack to the shared VPS. The deploy workflow builds nothing: it ships
 `compose.prod.yaml`, the nginx config and the mail configs to the box from the commit being
 deployed, and the images come from Artifact Registry.
+
+`api`, `ui` and `landing` are published by their own repositories. The three mail images are
+published from here, by `release.yml`, because the Dockerfiles that produce them live here.
 
 ## The model
 
@@ -28,7 +31,13 @@ the ufw rule. planelyx is `172.20`, auth `172.21`, listryx `172.22`.
 ## Deploying
 
 Run the `deploy` workflow and give it the tags to move. A blank tag leaves that service
-alone. `stampyx-api` migrations run **before** `up`, so a bad migration aborts the deploy
+alone — a deploy of the API alone does not restart Postfix, Dovecot or rspamd.
+
+`api`, `ui` and `landing` take a SHA from the release run in their own repository. Mail is
+different: the images are built from *this* repository, so instead of a tag you tick
+**build_mail**, and the deploy builds the three at the commit it is running from and uses
+that SHA. Leave `mail_tag` blank when you do. `mail_tag` is still there for the one case the
+box cannot express — putting an *older* mail image back. `stampyx-api` migrations run **before** `up`, so a bad migration aborts the deploy
 rather than reaching a running container.
 
 Roll back by re-running with the previous tags; the summary of every run records them.
@@ -51,8 +60,17 @@ the configuration in: each entrypoint renders `mail/postfix/`, `mail/dovecot/` a
 change to them is exercised by the developer stack before it is deployed.
 
 `stampyx-api/compose.yaml` builds these three and runs them next to the API, which is how the
-send path is tested locally. Production still pulls the images from Artifact Registry: this
-repository's deploy workflow builds nothing.
+send path is tested locally. It reaches them at `../stampyx-infra/mail/docker`, a path that
+only resolves on a machine with both repositories checked out side by side — which is why
+stampyx-api cannot be the thing that publishes them.
+
+Production pulls them from Artifact Registry, and `release.yml` in this repository is what
+puts them there: a push to `master` touching `mail/` builds `postfix`, `dovecot` and `rspamd`
+and tags all three with that commit SHA. `deploy.yml` calls the same workflow when
+`build_mail` is ticked, so the images and the `mail/` configs shipped in that run come from
+one commit rather than two. That SHA is the `MAIL_TAG` the deploy asks for. The
+three share one tag on purpose — Postfix and Dovecot read the same SQL maps and the same
+`MAIL_INTERNAL_SECRET`, so a mismatched pair is not a state worth being able to reach.
 
 ## Secrets and variables
 
