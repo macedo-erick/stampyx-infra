@@ -44,6 +44,11 @@ services:
       # The issuer string must resolve identically inside the container and in the browser.
       - 'stampyx.com:host-gateway'
       - 'auth.macedosoftware.com:host-gateway'
+      # Dovecot and Postfix present the mail.stampyx.com certificate, and both clients verify
+      # the hostname they dialled against it. Reaching them as dovecot:143 / postfix:587 fails
+      # that check, so the API goes back out through the published ports under the name the
+      # certificate actually carries.
+      - 'mail.stampyx.com:host-gateway'
     environment:
       DB_HOST: host.docker.internal
       DB_PORT: '5432'
@@ -64,9 +69,11 @@ services:
       STAMPYX_ACCOUNT_AUTO_APPROVE: ${STAMPYX_ACCOUNT_AUTO_APPROVE:-true}
 
       MAIL_INTERNAL_SECRET: ${MAIL_INTERNAL_SECRET:?MAIL_INTERNAL_SECRET is not set}
-      MAIL_IMAP_HOST: dovecot
-      MAIL_IMAP_PORT: '143'
-      MAIL_SMTP_HOST: postfix
+      MAIL_IMAP_HOST: mail.stampyx.com
+      # 993 is implicit TLS. Dovecot refuses plaintext auth on 143 without STARTTLS anyway,
+      # and 143 is not published, so it is not reachable by this route.
+      MAIL_IMAP_PORT: '993'
+      MAIL_SMTP_HOST: mail.stampyx.com
       MAIL_SMTP_PORT: '587'
       MAIL_MASTER_USER: stampyx-api
       MAIL_MASTER_PASSWORD: ${MAIL_MASTER_PASSWORD:?MAIL_MASTER_PASSWORD is not set}
@@ -111,6 +118,9 @@ services:
       API_INTERNAL_URL: http://api:8080
       MAIL_INTERNAL_SECRET: ${MAIL_INTERNAL_SECRET:?MAIL_INTERNAL_SECRET is not set}
     volumes:
+      # The image bakes no configuration: the entrypoint renders these at start. The deploy
+      # ships this directory next to the compose file, so image and config share a commit.
+      - ./mail/postfix:/etc/stampyx/postfix:ro
       - /etc/letsencrypt/live/mail.stampyx.com:/etc/letsencrypt/live/mail.stampyx.com:ro
       - /etc/letsencrypt/archive/mail.stampyx.com:/etc/letsencrypt/archive/mail.stampyx.com:ro
     logging: *logging
@@ -134,6 +144,7 @@ services:
       MAIL_MASTER_USER: stampyx-api
       MAIL_MASTER_PASSWORD: ${MAIL_MASTER_PASSWORD:?MAIL_MASTER_PASSWORD is not set}
     volumes:
+      - ./mail/dovecot:/etc/stampyx/dovecot:ro
       - vmail:/data/vmail
       - sieve:/data/sieve
       - /etc/letsencrypt/live/mail.stampyx.com:/etc/letsencrypt/live/mail.stampyx.com:ro
@@ -145,5 +156,6 @@ services:
     restart: unless-stopped
     networks: [stampyx]
     volumes:
+      - ./mail/rspamd/local.d:/etc/rspamd/local.d:ro
       - rspamd:/var/lib/rspamd
     logging: *logging
