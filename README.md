@@ -58,16 +58,20 @@ repository's deploy workflow builds nothing.
 
 Secrets: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `VPS_SSH_KNOWN_HOSTS`, `GCP_PROJECT_ID`,
 `APP_DB_PASSWORD`, `KEYCLOAK_ADMIN_CLIENT_SECRET`, `STAMPYX_PROVISIONING_SECRET`,
-`MAIL_INTERNAL_SECRET`, `MAIL_MASTER_PASSWORD`, `MAIL_PUBLIC_IP`.
+`STAMPYX_JWT_SECRET`, `MAIL_INTERNAL_SECRET`, `MAIL_MASTER_PASSWORD`, `MAIL_PUBLIC_IP`.
 
-Variables: `API_LOG_LEVEL` (default `info`).
+Variables: `API_LOG_LEVEL` (default `info`), `STAMPYX_ACCOUNT_AUTO_APPROVE` (default `true`).
 
 There is no `GCP_SA_KEY` here — the VPS holds its own read-only registry login and the runner
 never touches the registry.
 
-`STAMPYX_PROVISIONING_SECRET` also lives in the **auth** repo's secrets, and nothing checks
-that the two copies agree. Rotating it means updating both repositories and redeploying both
-stacks.
+`STAMPYX_PROVISIONING_SECRET` also lives in the **auth** repo's secrets, and
+`KEYCLOAK_ADMIN_CLIENT_SECRET` lives there under the different name
+`STAMPYX_KEYCLOAK_ADMIN_CLIENT_SECRET`. Nothing checks that either pair agrees. Rotating one
+means updating both repositories and redeploying both stacks.
+
+**VPS_SETUP.md section 10** has the full per-repository table, including what the three build
+repos and the auth repo need.
 
 ## Layout
 

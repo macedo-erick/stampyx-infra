@@ -58,10 +58,12 @@ jobs:
           APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
           KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
           STAMPYX_PROVISIONING_SECRET: ${{ secrets.STAMPYX_PROVISIONING_SECRET }}
+          STAMPYX_JWT_SECRET: ${{ secrets.STAMPYX_JWT_SECRET }}
           MAIL_INTERNAL_SECRET: ${{ secrets.MAIL_INTERNAL_SECRET }}
           MAIL_MASTER_PASSWORD: ${{ secrets.MAIL_MASTER_PASSWORD }}
           MAIL_PUBLIC_IP: ${{ secrets.MAIL_PUBLIC_IP }}
           API_LOG_LEVEL: ${{ vars.API_LOG_LEVEL }}
+          STAMPYX_ACCOUNT_AUTO_APPROVE: ${{ vars.STAMPYX_ACCOUNT_AUTO_APPROVE }}
         run: |
           set -euo pipefail
           fail=0
@@ -88,8 +90,8 @@ jobs:
           # A single quote cannot be represented in a Compose .env value, and there is no
           # escape for it, so a credential containing one would break the whole stack.
           for name in GCP_PROJECT_ID APP_DB_PASSWORD KEYCLOAK_ADMIN_CLIENT_SECRET \
-                      STAMPYX_PROVISIONING_SECRET MAIL_INTERNAL_SECRET MAIL_MASTER_PASSWORD \
-                      MAIL_PUBLIC_IP; do
+                      STAMPYX_PROVISIONING_SECRET STAMPYX_JWT_SECRET MAIL_INTERNAL_SECRET \
+                      MAIL_MASTER_PASSWORD MAIL_PUBLIC_IP; do
               value=${!name:-}
 
               if [[ -z $value ]]; then
@@ -104,6 +106,19 @@ jobs:
           if [[ -n ${API_LOG_LEVEL:-} ]] &&
              [[ ! $API_LOG_LEVEL =~ ^(trace|debug|info|warn|error|fatal)$ ]]; then
               echo "::error::API_LOG_LEVEL '$API_LOG_LEVEL' is not a pino level"
+              fail=1
+          fi
+
+          if [[ -n ${STAMPYX_ACCOUNT_AUTO_APPROVE:-} ]] &&
+             [[ ! $STAMPYX_ACCOUNT_AUTO_APPROVE =~ ^(true|false)$ ]]; then
+              echo "::error::STAMPYX_ACCOUNT_AUTO_APPROVE '$STAMPYX_ACCOUNT_AUTO_APPROVE' is not true or false"
+              fail=1
+          fi
+
+          # The API rejects a shorter one at boot, which would show up as a restart loop
+          # several minutes into the deploy rather than here.
+          if [[ -n ${STAMPYX_JWT_SECRET:-} && ${#STAMPYX_JWT_SECRET} -lt 32 ]]; then
+              echo '::error::STAMPYX_JWT_SECRET must be at least 32 characters'
               fail=1
           fi
 
@@ -180,6 +195,7 @@ jobs:
           APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
           KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
           STAMPYX_PROVISIONING_SECRET: ${{ secrets.STAMPYX_PROVISIONING_SECRET }}
+          STAMPYX_JWT_SECRET: ${{ secrets.STAMPYX_JWT_SECRET }}
           MAIL_INTERNAL_SECRET: ${{ secrets.MAIL_INTERNAL_SECRET }}
           MAIL_MASTER_PASSWORD: ${{ secrets.MAIL_MASTER_PASSWORD }}
         run: |
@@ -191,7 +207,7 @@ jobs:
 
           fail=0
           for name in APP_DB_PASSWORD KEYCLOAK_ADMIN_CLIENT_SECRET STAMPYX_PROVISIONING_SECRET \
-                      MAIL_INTERNAL_SECRET MAIL_MASTER_PASSWORD; do
+                      STAMPYX_JWT_SECRET MAIL_INTERNAL_SECRET MAIL_MASTER_PASSWORD; do
               remote=$(sed -n "s/^$name=//p" <<< "$live" | tail -n1 | sed "s/^'//; s/'$//")
 
               if [[ -n $remote && $remote != "${!name}" ]]; then
@@ -208,10 +224,12 @@ jobs:
           APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
           KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
           STAMPYX_PROVISIONING_SECRET: ${{ secrets.STAMPYX_PROVISIONING_SECRET }}
+          STAMPYX_JWT_SECRET: ${{ secrets.STAMPYX_JWT_SECRET }}
           MAIL_INTERNAL_SECRET: ${{ secrets.MAIL_INTERNAL_SECRET }}
           MAIL_MASTER_PASSWORD: ${{ secrets.MAIL_MASTER_PASSWORD }}
           MAIL_PUBLIC_IP: ${{ secrets.MAIL_PUBLIC_IP }}
           API_LOG_LEVEL: ${{ vars.API_LOG_LEVEL }}
+          STAMPYX_ACCOUNT_AUTO_APPROVE: ${{ vars.STAMPYX_ACCOUNT_AUTO_APPROVE }}
         run: |
           set -euo pipefail
           # Built here and piped straight over; never echoed into the log.
@@ -224,6 +242,8 @@ jobs:
             printf "APP_DB_PASSWORD='%s'\n" "$APP_DB_PASSWORD"
             printf "KEYCLOAK_ADMIN_CLIENT_SECRET='%s'\n" "$KEYCLOAK_ADMIN_CLIENT_SECRET"
             printf "STAMPYX_PROVISIONING_SECRET='%s'\n" "$STAMPYX_PROVISIONING_SECRET"
+            printf "STAMPYX_JWT_SECRET='%s'\n" "$STAMPYX_JWT_SECRET"
+            printf 'STAMPYX_ACCOUNT_AUTO_APPROVE=%s\n' "${STAMPYX_ACCOUNT_AUTO_APPROVE:-true}"
             printf "MAIL_INTERNAL_SECRET='%s'\n" "$MAIL_INTERNAL_SECRET"
             printf "MAIL_MASTER_PASSWORD='%s'\n" "$MAIL_MASTER_PASSWORD"
             printf 'MAIL_PUBLIC_IP=%s\n' "$MAIL_PUBLIC_IP"
@@ -298,7 +318,7 @@ jobs:
           for file in nginx/stampyx.conf nginx/snippets/stampyx-proxy.conf; do
               live=$(live_path_for "$file")
 
-              [[ -f $live ]] || { echo "error: $live does not exist. See VPS_SETUP.md section 5." >&2; exit 1; }
+              [[ -f $live ]] || { echo "error: $live does not exist. Create it first: VPS_SETUP.md section 3." >&2; exit 1; }
               [[ -w $live ]] || { echo "error: $live is not writable by this user. See VPS_SETUP.md section 5." >&2; exit 1; }
 
               if cmp -s "$file" "$live"; then
