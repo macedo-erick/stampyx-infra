@@ -1,0 +1,60 @@
+name: release
+
+on:
+  # Only the mail plane is built here. Restricting the push trigger to mail/ keeps an nginx
+  # or docs commit from publishing three identical images under a new tag.
+  push:
+    branches: [master]
+    paths:
+      - 'mail/**'
+      - '.github/workflows/release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  REGION: southamerica-east1
+  REPOSITORY: stampyx
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    strategy:
+      # One image per Dockerfile, all tagged with the same commit SHA: the deploy workflow
+      # has a single MAIL_TAG for the three, and Postfix and Dovecot share the SQL maps and
+      # the internal secret, so a mismatched pair is not a state worth being able to reach.
+      matrix:
+        image: [postfix, dovecot, rspamd]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          # The entrypoints and dev-cert.sh the Dockerfiles COPY all live in mail/docker/,
+          # so that directory is the whole context. The configs under mail/postfix/,
+          # mail/dovecot/ and mail/rspamd/ are deliberately not baked in — the deploy ships
+          # them to the VPS and each entrypoint renders them at start.
+          context: mail/docker
+          file: mail/docker/Dockerfile.${{ matrix.image }}
+          push: true
+          tags: |
+            ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/${{ matrix.image }}:latest
+          # Scoped per image: one unscoped gha cache would have the three overwrite each
+          # other's layers on every run.
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+  summary:
+    needs: build-push
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "Deploy with MAIL_TAG=${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
