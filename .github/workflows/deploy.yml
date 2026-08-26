@@ -19,6 +19,10 @@ on:
         description: 'Mail image tag (commit SHA) — leave blank to leave postfix, dovecot and rspamd untouched'
         type: string
         default: ''
+      build_mail:
+        description: 'Build the mail images from this commit and deploy them (leave mail_tag blank)'
+        type: boolean
+        default: false
       allow_secret_change:
         description: 'Allow credentials to differ from the VPS (credential rotation)'
         type: boolean
@@ -44,7 +48,17 @@ env:
   NGINX_PAYLOAD: nginx/stampyx.conf nginx/snippets/stampyx-proxy.conf
 
 jobs:
+  # Skipped unless the box is ticked. Publishing from the deploy run is what lets the mail
+  # tag be filled in automatically: it is this commit's SHA, so there is nothing to copy.
+  build-mail:
+    if: ${{ inputs.build_mail }}
+    uses: ./.github/workflows/release.yml
+    secrets: inherit
+
   deploy:
+    needs: [build-mail]
+    # `skipped` is the normal case: every deploy that does not touch mail.
+    if: ${{ always() && (needs.build-mail.result == 'success' || needs.build-mail.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: production
     timeout-minutes: 20
@@ -57,7 +71,7 @@ jobs:
           API_TAG: ${{ inputs.api_tag }}
           UI_TAG: ${{ inputs.ui_tag }}
           LANDING_TAG: ${{ inputs.landing_tag }}
-          MAIL_TAG: ${{ inputs.mail_tag }}
+          MAIL_TAG: ${{ inputs.build_mail && github.sha || inputs.mail_tag }}
           GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
           APP_DB_PASSWORD: ${{ secrets.APP_DB_PASSWORD }}
           KEYCLOAK_ADMIN_CLIENT_SECRET: ${{ secrets.KEYCLOAK_ADMIN_CLIENT_SECRET }}
@@ -95,7 +109,12 @@ jobs:
           done
 
           if [[ -z ${selected// /} ]]; then
-              echo '::error::Nothing selected. Give at least one tag.'
+              echo '::error::Nothing selected. Give at least one tag, or tick build_mail.'
+              fail=1
+          fi
+
+          if [[ '${{ inputs.build_mail }}' == 'true' && -n '${{ inputs.mail_tag }}' ]]; then
+              echo '::error::build_mail builds this commit and deploys it. Leave mail_tag blank, or untick build_mail to deploy an existing tag.'
               fail=1
           fi
 
@@ -173,6 +192,8 @@ jobs:
 
       - name: Read current tags from the VPS
         id: current
+        env:
+          MAIL_TAG: ${{ inputs.build_mail && github.sha || inputs.mail_tag }}
         run: |
           set -euo pipefail
           # shellcheck disable=SC2086
@@ -195,7 +216,7 @@ jobs:
                 api) chosen=${{ inputs.api_tag }} ;;
                 ui) chosen=${{ inputs.ui_tag }} ;;
                 landing) chosen=${{ inputs.landing_tag }} ;;
-                mail) chosen=${{ inputs.mail_tag }} ;;
+                mail) chosen=$MAIL_TAG ;;
               esac
               chosen=${chosen:-$live}
 
