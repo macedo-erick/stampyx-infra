@@ -5,7 +5,8 @@ Deploys the Stampyx stack to the shared VPS. The deploy workflow builds nothing:
 deployed, and the images come from Artifact Registry.
 
 `api`, `ui` and `landing` are published by their own repositories. The three mail images are
-published from here, by `release.yml`, because the Dockerfiles that produce them live here.
+published by the deploy workflow itself, because the Dockerfiles that produce them live here.
+There is one workflow in this repository, and it is `deploy.yml`.
 
 ## The model
 
@@ -64,11 +65,14 @@ send path is tested locally. It reaches them at `../stampyx-infra/mail/docker`, 
 only resolves on a machine with both repositories checked out side by side — which is why
 stampyx-api cannot be the thing that publishes them.
 
-Production pulls them from Artifact Registry, and `release.yml` in this repository is what
-puts them there: a push to `master` touching `mail/` builds `postfix`, `dovecot` and `rspamd`
-and tags all three with that commit SHA. `deploy.yml` calls the same workflow when
-`build_mail` is ticked, so the images and the `mail/` configs shipped in that run come from
-one commit rather than two. That SHA is the `MAIL_TAG` the deploy asks for. The
+Production pulls them from Artifact Registry, and the deploy's `build-mail` job is what puts
+them there. It is skipped unless `build_mail` is ticked; when it runs, it builds `postfix`,
+`dovecot` and `rspamd` and tags all three with the commit the deploy is running from. That
+same run ships the `mail/` configs to the VPS, so image and config come from one commit
+rather than two.
+
+Nothing builds them on a push to `master`. A mail change reaches production when you deploy
+it, which means a broken Dockerfile surfaces in the deploy run rather than at merge time. That SHA is the `MAIL_TAG` the deploy asks for. The
 three share one tag on purpose — Postfix and Dovecot read the same SQL maps and the same
 `MAIL_INTERNAL_SECRET`, so a mismatched pair is not a state worth being able to reach.
 

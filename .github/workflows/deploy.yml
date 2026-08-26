@@ -42,22 +42,37 @@ env:
   PUBLIC_URL: https://stampyx.com
   NEIGHBOUR_URL: https://listryx.com/ui/
   WAIT_TIMEOUT: '300'
-  # keycloak-proxy.conf is deliberately absent: the auth repo owns the live file, and this
-  # workflow copies an explicit list rather than syncing the directory. A sync would delete
-  # it, and stampyx.conf includes it, so the next `nginx -t` would fail.
   NGINX_PAYLOAD: nginx/stampyx.conf nginx/snippets/stampyx-proxy.conf
 
 jobs:
-  # Skipped unless the box is ticked. Publishing from the deploy run is what lets the mail
-  # tag be filled in automatically: it is this commit's SHA, so there is nothing to copy.
   build-mail:
     if: ${{ inputs.build_mail }}
-    uses: ./.github/workflows/release.yml
-    secrets: inherit
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        image: [postfix, dovecot, rspamd]
+      fail-fast: false
+    steps:
+      - uses: actions/checkout@v5
+      - uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - run: gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev --quiet
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: mail/docker
+          file: mail/docker/Dockerfile.${{ matrix.image }}
+          push: true
+          tags: |
+            ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/${{ matrix.image }}:${{ github.sha }}
+            ${{ env.REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/${{ env.REPOSITORY }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
 
   deploy:
     needs: [build-mail]
-    # `skipped` is the normal case: every deploy that does not touch mail.
     if: ${{ always() && (needs.build-mail.result == 'success' || needs.build-mail.result == 'skipped') }}
     runs-on: ubuntu-latest
     environment: production
