@@ -330,6 +330,12 @@ jobs:
 
           rm -rf mail && mv .mail-staged/mail mail && rm -rf .mail-staged
 
+          # Compose silently creates a missing bind source as an empty directory, so a mail
+          # config that failed to arrive shows up only as a crash loop several minutes later.
+          for file in mail/postfix/main.cf mail/dovecot/dovecot.conf mail/rspamd/local.d/dkim_signing.conf; do
+              [[ -f $file ]] || { echo "error: $file is missing; the mail configs did not arrive" >&2; exit 1; }
+          done
+
           COMPOSE=compose.prod.yaml
 
           # Before `up`, so a bad migration never reaches a running container.
