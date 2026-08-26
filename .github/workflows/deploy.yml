@@ -72,7 +72,10 @@ jobs:
           set -euo pipefail
           fail=0
           selected=''
+          planes=0
 
+          # `mail` is one input but three Compose services. Everything downstream — pull and
+          # up — takes real service names, so the expansion happens here, once.
           for pair in "api:$API_TAG" "ui:$UI_TAG" "landing:$LANDING_TAG" "mail:$MAIL_TAG"; do
               name=${pair%%:*}
               tag=${pair#*:}
@@ -83,7 +86,12 @@ jobs:
                   fail=1
               fi
 
-              selected="$selected $name"
+              case $name in
+                  mail) selected="$selected postfix dovecot rspamd" ;;
+                  *) selected="$selected $name" ;;
+              esac
+
+              planes=$((planes + 1))
           done
 
           if [[ -z ${selected// /} ]]; then
@@ -128,6 +136,12 @@ jobs:
 
           [[ $fail -eq 0 ]] || exit 1
           echo "services=${selected# }" >> "$GITHUB_OUTPUT"
+          # Counting service names would not answer this any more: mail alone is three.
+          if [[ $planes -eq 4 ]]; then
+              echo 'full=true' >> "$GITHUB_OUTPUT"
+          else
+              echo 'full=false' >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Configure SSH
         env:
@@ -261,12 +275,17 @@ jobs:
           ssh $SSH_OPTS "$REMOTE" "cd '$VPS_PATH' && docker compose -f compose.prod.yaml.staged --env-file .env.staged pull ${{ steps.validate.outputs.services }}"
 
       - name: Deploy
+        env:
+          FULL: ${{ steps.validate.outputs.full }}
+          SELECTED: ${{ steps.validate.outputs.services }}
         run: |
           set -euo pipefail
+          # SELECTED is deliberately unquoted: ssh joins the command argv into one string
+          # that the remote shell re-splits, so each service has to arrive as its own word.
           # shellcheck disable=SC2086
-          ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" "$WAIT_TIMEOUT" "${{ steps.validate.outputs.services }}" <<'REMOTE_SCRIPT' | tee /tmp/deploy.log
+          ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" "$WAIT_TIMEOUT" "$FULL" $SELECTED <<'REMOTE_SCRIPT' | tee /tmp/deploy.log
           set -euo pipefail
-          path=$1; wait_timeout=$2; read -ra services <<< "$3"
+          path=$1; wait_timeout=$2; full=$3; shift 3; services=("$@")
           cd "$path"
 
           [[ -f .env ]] && cp .env .env.prev
@@ -283,7 +302,7 @@ jobs:
                   || { echo 'error: stampyx-api migrations failed; the stack was not touched' >&2; exit 1; }
           fi
 
-          if [[ ${#services[@]} -eq 4 ]]; then
+          if [[ $full == true ]]; then
               docker compose -f "$COMPOSE" up -d --wait --wait-timeout "$wait_timeout" --remove-orphans
           else
               docker compose -f "$COMPOSE" up -d --wait --wait-timeout "$wait_timeout" --no-deps "${services[@]}"
