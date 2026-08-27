@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
-# Dovecot for the mail plane: IMAP for the panel, LMTP for Postfix deliveries, and the Sieve
-# pipe that tells the API a message arrived. dovecot.conf and the SQL passdb are mounted from
-# mail/dovecot/ and installed at start.
+# IMAP for the panel, LMTP for Postfix, and the Sieve pipe that tells the API a message arrived.
+# dovecot.conf and the SQL passdb are mounted from mail/dovecot/ and installed at start.
 
 FROM debian:bookworm-slim
 

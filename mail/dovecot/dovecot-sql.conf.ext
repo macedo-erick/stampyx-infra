@@ -1,6 +1,5 @@
 driver = pgsql
 connect = host=${DB_HOST} dbname=${DB_NAME} user=${DB_USER} password=${DB_PASSWORD}
 
-# Dovecot reads the scheme prefix out of the stored value, so the column carries
-# {ARGON2ID}$argon2id$... and no default_pass_scheme is set here.
+# The scheme is read from the stored value ({ARGON2ID}$argon2id$...), so no default_pass_scheme.
 password_query = SELECT email AS user, password_hash AS password FROM v_dovecot_users WHERE email = '%u'

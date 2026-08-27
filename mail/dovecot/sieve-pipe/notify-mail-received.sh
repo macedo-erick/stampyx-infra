@@ -1,13 +1,10 @@
 #!/bin/sh
-# Called by the Sieve `pipe :copy` on every delivery that nothing filed away. Reads the
-# message on stdin, pulls out the headers the panel needs, and hands them to the API.
-#
-# :copy means Sieve does not wait on the exit status, so a failure here delays no delivery.
+# Called by the Sieve `pipe :copy` on every unfiled delivery: reads the message on stdin and
+# hands the panel's headers to the API. :copy ignores the exit status, so a failure delays nothing.
 
 set -eu
 
-# Dovecot's sieve_extprograms execs with a cleared environment, so nothing the container
-# was started with reaches this script. The entrypoint drops the two values it needs here.
+# sieve_extprograms execs with a cleared environment, so the entrypoint drops these two here.
 if [ -f /etc/dovecot/notify.env ]; then
     . /etc/dovecot/notify.env
 fi
@@ -16,15 +13,13 @@ header() {
     sed -n "/^$1:/I{s/^$1:[[:space:]]*//Ip;q;}"
 }
 
-# The Sieve script passes the folder it filed the message into; without it every
-# report claimed INBOX, wherever the message actually went.
+# Passed by the Sieve script; without it every report claimed INBOX wherever the message went.
 folder=${1:-INBOX}
 
 message=$(cat)
 
-# Dovecot's sieve_extprograms clears the environment, so $USER is empty here and the
-# payload used to go out with an empty mailbox - which the API rejected with a 400 that
-# nothing ever saw. The delivered message carries the recipient itself.
+# $USER is empty under the cleared environment, and the payload used to go out with an empty
+# mailbox for the API to reject with an unseen 400. The delivered message carries the recipient.
 mailbox=$(printf '%s' "$message" | header 'Delivered-To')
 if [ -z "$mailbox" ]; then
     mailbox=$(printf '%s' "$message" | header 'X-Original-To')
@@ -53,8 +48,7 @@ if [ -z "$mailbox" ]; then
     exit 0
 fi
 
-# Never fails the delivery, but no longer fails silently either: dovecot's log_path is
-# stderr, so a rejected report shows up in the mail log instead of vanishing.
+# Never fails the delivery, but no longer silently: log_path is stderr, so a rejected report is logged.
 response=$(curl -sS --max-time 5 -o /dev/null -w '%{http_code}' \
     -X POST "${API_INTERNAL_URL}/internal/mail/received" \
     -H 'Content-Type: application/json' \

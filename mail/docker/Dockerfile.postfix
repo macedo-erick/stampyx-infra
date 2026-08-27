@@ -1,7 +1,6 @@
 # syntax=docker/dockerfile:1
-# Postfix for the mail plane. The configuration is not baked in: main.cf, the master.cf
-# additions and the four pgsql maps are mounted from mail/postfix/ and rendered at start,
-# so the repo stays the single source of truth for both this image and production.
+# Nothing is baked in: main.cf, the master.cf additions and the four pgsql maps are mounted
+# from mail/postfix/ and rendered at start, so the repo stays the source of truth.
 
 FROM debian:bookworm-slim
 
