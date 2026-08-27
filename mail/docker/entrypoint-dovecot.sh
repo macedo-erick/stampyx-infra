@@ -41,6 +41,7 @@ printf '%s:%s\n' "$MAIL_MASTER_USER" \
 chown root:dovecot /etc/dovecot/master-users
 chmod 640 /etc/dovecot/master-users
 
-install -d -o vmail -g vmail -m 755 /data/vmail /data/sieve
+install -d -o vmail -g vmail -m 755 /data/vmail
+install -d -o vmail -g vmail -m 2775 /data/sieve
 
 exec dovecot -F
