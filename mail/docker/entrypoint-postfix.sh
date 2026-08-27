@@ -10,8 +10,7 @@ set -eu
 
 src=/etc/stampyx/postfix
 
-# Only the placeholders are substituted: main.cf also contains Postfix's own $myhostname,
-# which a bare envsubst would blank out.
+# Only the placeholders: main.cf also has Postfix's own $myhostname, which bare envsubst would blank.
 envsubst '${MAIL_HOSTNAME}' < "$src/main.cf" > /etc/postfix/main.cf
 
 mkdir -p /etc/postfix/pgsql
@@ -24,20 +23,16 @@ done
 chgrp postfix /etc/postfix/pgsql/*.cf
 chmod 640 /etc/postfix/pgsql/*.cf
 
-# master.cf ships as an append onto the distribution's file, so guard against a restart
-# stacking a second copy of the submission and smtps services. The marker has to be our
-# own: Debian's master.cf already carries a commented-out submission block, and matching
-# on that silently skips the append.
+# An append onto the distribution's file, so guard against a restart stacking a second copy.
+# The marker must be ours: Debian ships a commented-out submission block that would falsely match.
 marker='# --- appended by stampyx-infra ---'
 if ! grep -qF "$marker" /etc/postfix/master.cf; then
     printf '\n%s\n' "$marker" >> /etc/postfix/master.cf
     cat "$src/master.cf.append" >> /etc/postfix/master.cf
 fi
 
-# smtpd runs chrooted, which is what the chroot column in master.cf asks for. The jail
-# needs its own copy of the resolver and lookup files, or the SASL socket and the milter
-# cannot be resolved by name and every connection dies with "no SASL authentication
-# mechanisms" before it reaches a command.
+# smtpd runs chrooted per master.cf, so the jail needs its own resolver and lookup files, or the
+# SASL socket and milter resolve to nothing and every connection dies before its first command.
 chroot_etc=/var/spool/postfix/etc
 mkdir -p "$chroot_etc"
 for file in resolv.conf services hosts host.conf nsswitch.conf localtime; do

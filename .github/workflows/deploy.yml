@@ -103,8 +103,7 @@ jobs:
           selected=''
           planes=0
 
-          # `mail` is one input but three Compose services. Everything downstream — pull and
-          # up — takes real service names, so the expansion happens here, once.
+          # `mail` is one input but three Compose services; downstream wants real names, so expand once.
           for pair in "api:$API_TAG" "ui:$UI_TAG" "landing:$LANDING_TAG" "mail:$MAIL_TAG"; do
               name=${pair%%:*}
               tag=${pair#*:}
@@ -133,8 +132,7 @@ jobs:
               fail=1
           fi
 
-          # A single quote cannot be represented in a Compose .env value, and there is no
-          # escape for it, so a credential containing one would break the whole stack.
+          # A Compose .env value can neither hold nor escape a single quote; one in a credential breaks the stack.
           for name in GCP_PROJECT_ID APP_DB_PASSWORD KEYCLOAK_ADMIN_CLIENT_SECRET \
                       STAMPYX_PROVISIONING_SECRET STAMPYX_JWT_SECRET MAIL_INTERNAL_SECRET \
                       MAIL_MASTER_PASSWORD MAIL_PUBLIC_IP; do
@@ -161,8 +159,7 @@ jobs:
               fail=1
           fi
 
-          # The API rejects a shorter one at boot, which would show up as a restart loop
-          # several minutes into the deploy rather than here.
+          # The API rejects a shorter one at boot: a restart loop minutes into the deploy instead of failing here.
           if [[ -n ${STAMPYX_JWT_SECRET:-} && ${#STAMPYX_JWT_SECRET} -lt 32 ]]; then
               echo '::error::STAMPYX_JWT_SECRET must be at least 32 characters'
               fail=1
@@ -316,8 +313,7 @@ jobs:
           SELECTED: ${{ steps.validate.outputs.services }}
         run: |
           set -euo pipefail
-          # SELECTED is deliberately unquoted: ssh joins the command argv into one string
-          # that the remote shell re-splits, so each service has to arrive as its own word.
+          # SELECTED is deliberately unquoted: the remote shell re-splits the argv, so each service needs its own word.
           # shellcheck disable=SC2086
           ssh $SSH_OPTS "$REMOTE" bash -s -- "$VPS_PATH" "$WAIT_TIMEOUT" "$FULL" $SELECTED <<'REMOTE_SCRIPT' | tee /tmp/deploy.log
           set -euo pipefail
@@ -330,8 +326,7 @@ jobs:
 
           rm -rf mail && mv .mail-staged/mail mail && rm -rf .mail-staged
 
-          # Compose silently creates a missing bind source as an empty directory, so a mail
-          # config that failed to arrive shows up only as a crash loop several minutes later.
+          # Compose turns a missing bind source into an empty dir, so config that never arrived shows up as a crash loop.
           for file in mail/postfix/main.cf mail/dovecot/dovecot.conf mail/rspamd/local.d/dkim_signing.conf; do
               [[ -f $file ]] || { echo "error: $file is missing; the mail configs did not arrive" >&2; exit 1; }
           done

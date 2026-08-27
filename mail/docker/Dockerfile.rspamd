@@ -1,6 +1,5 @@
 # syntax=docker/dockerfile:1
-# rspamd as the milter Postfix hands every message to, inbound and outbound. The local.d
-# overrides are mounted from mail/rspamd/, not baked in.
+# The milter Postfix hands every message to, inbound and outbound. local.d is mounted, not baked in.
 
 FROM debian:bookworm-slim
 

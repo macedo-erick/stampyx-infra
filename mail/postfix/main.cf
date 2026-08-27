@@ -1,5 +1,4 @@
-# Managed by stampyx-infra. Domains, mailboxes and permitted senders all come from Postgres
-# through the three views the API owns; nothing here is a static map.
+# Managed by stampyx-infra. Domains, mailboxes and senders come from the three API-owned views.
 
 myhostname = ${MAIL_HOSTNAME}
 mydestination =
@@ -19,9 +18,8 @@ smtpd_sasl_type = dovecot
 smtpd_sasl_path = inet:dovecot:12345
 smtpd_sasl_auth_enable = yes
 
-# Binds an authenticated login to the addresses it may use as MAIL FROM. Without the
-# reject below, authenticating would be enough to send as another tenant's verified
-# domain, and this server would DKIM-sign the forgery.
+# Binds a login to the addresses it may use as MAIL FROM. Without the reject below, any account
+# could send as another tenant's verified domain and have this server DKIM-sign the forgery.
 smtpd_sender_login_maps = pgsql:/etc/postfix/pgsql/senders.cf
 
 smtpd_tls_cert_file = /etc/letsencrypt/live/${MAIL_HOSTNAME}/fullchain.pem
